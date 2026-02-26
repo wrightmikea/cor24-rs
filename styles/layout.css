@@ -1,0 +1,18 @@
+/* Game-Specific Layout CSS */
+/* Only layout rules specific to this game's grid structure */
+
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+/* Main Content Grid - account for sidebar */
+.main-content {
+    display: grid;
+    grid-template-columns: 0.75fr 1.25fr;
+    gap: 8px;
+    flex: 1;
+    overflow: hidden;
+    margin-left: 160px; /* Space for fixed sidebar */
+}

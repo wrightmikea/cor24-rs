@@ -1,0 +1,6 @@
+references/
+target/
+pages/
+*.swp
+*.swo
+.DS_Store
