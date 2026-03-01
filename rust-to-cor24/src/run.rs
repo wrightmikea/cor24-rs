@@ -1,17 +1,27 @@
 //! cor24-run: COR24 assembler and emulator CLI
 //!
 //! Usage:
-//!   cor24-run --demo                           Run built-in LED demo
-//!   cor24-run --run <file.s>                   Assemble and run
+//!   cor24-run --demo                              Run built-in LED demo
+//!   cor24-run --demo --speed 50000 --time 10      Run at 50k IPS for 10 seconds
+//!   cor24-run --run <file.s>                      Assemble and run
 //!   cor24-run --assemble <in.s> <out.bin> <out.lst>  Assemble to binary + listing
 
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Write;
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Memory-mapped I/O address for LEDs
 const IO_LEDSWDAT: u32 = 0xFF0000;
+
+/// Default emulation speed (instructions per second)
+/// Calibrated so spin loop of ~1000 iterations gives ~0.5s delay at default speed
+const DEFAULT_SPEED: u64 = 100_000;
+
+/// Default time limit in seconds
+const DEFAULT_TIME_LIMIT: f64 = 10.0;
 
 /// Minimal COR24 CPU state
 struct Cpu {
@@ -22,8 +32,7 @@ struct Cpu {
     halted: bool,
     leds: u8,
     prev_leds: u8,
-    led_changes: u32,
-    max_led_changes: u32,
+    cycles: u64,
 }
 
 impl Cpu {
@@ -36,8 +45,7 @@ impl Cpu {
             halted: false,
             leds: 0,
             prev_leds: 0xFF,
-            led_changes: 0,
-            max_led_changes: 16, // Stop after 16 LED changes by default
+            cycles: 0,
         };
         // Initialize stack pointer to top of RAM
         cpu.regs[4] = 0xFE00; // sp = 0xFE00 (below I/O region)
@@ -63,10 +71,6 @@ impl Cpu {
             if self.leds != self.prev_leds {
                 print_leds(self.leds);
                 self.prev_leds = self.leds;
-                self.led_changes += 1;
-                if self.led_changes >= self.max_led_changes {
-                    self.halted = true;
-                }
             }
         } else if (addr & 0xFF0000) != 0xFF0000 {
             let len = self.mem.len();
@@ -91,6 +95,7 @@ impl Cpu {
     fn step(&mut self) -> bool {
         if self.halted { return false; }
         let b0 = self.read_byte(self.pc);
+        self.cycles += 1;
 
         match b0 {
             // halt (la ir,0)
@@ -124,7 +129,7 @@ impl Cpu {
                 self.set_reg(ra, imm as u32);
                 self.pc = Self::mask24(self.pc + 2);
             }
-            // add ra,rb
+            // add ra,rb (0x00-0x02 for r0, 0x08 for r1,r0, etc.)
             0x00..=0x02 => {
                 let rb = b0;
                 let v = Self::mask24(self.get_reg(0).wrapping_add(self.get_reg(rb)));
@@ -137,6 +142,26 @@ impl Cpu {
                 let v = Self::mask24(self.get_reg(0).wrapping_add(Self::sign_ext8(imm)));
                 self.set_reg(0, v);
                 self.pc = Self::mask24(self.pc + 2);
+            }
+            // sub r0,rb (0x0A for sub r0,r1, 0x0B for sub r0,r2)
+            0x0A..=0x0B => {
+                let rb = b0 - 0x09; // 0x0A -> rb=1, 0x0B -> rb=2
+                let ra_val = self.get_reg(0);
+                let rb_val = self.get_reg(rb);
+                let result = Self::mask24(ra_val.wrapping_sub(rb_val));
+                self.set_reg(0, result);
+                // Set condition flag: true if result > 0 (for brt to work as "branch if positive")
+                self.c = result != 0 && (result & 0x800000) == 0;
+                self.pc = Self::mask24(self.pc + 1);
+            }
+            // sub r2,r0 (0xA0 based on encoding)
+            0xA0 => {
+                let ra_val = self.get_reg(2);
+                let rb_val = self.get_reg(0);
+                let result = Self::mask24(ra_val.wrapping_sub(rb_val));
+                self.set_reg(2, result);
+                self.c = result != 0 && (result & 0x800000) == 0;
+                self.pc = Self::mask24(self.pc + 1);
             }
             // add sp,imm
             0x21 => {
@@ -163,7 +188,6 @@ impl Cpu {
                 self.pc += 1;
             }
             // sb ra,imm(rb) - store byte
-            // Encoding: 0x80 + ra*8 + rb
             0x80..=0x89 => {
                 let idx = b0 - 0x80;
                 let ra = idx / 8;
@@ -257,12 +281,59 @@ impl Cpu {
 }
 
 fn print_leds(leds: u8) {
-    print!("LEDs: ");
+    print!("\rLEDs: ");
     for i in (0..8).rev() {
         if (leds >> i) & 1 == 1 { print!("\x1b[91m●\x1b[0m"); }
         else { print!("○"); }
     }
-    println!("  (0x{:02X})", leds);
+    print!("  (0x{:02X})  ", leds);
+    std::io::stdout().flush().ok();
+}
+
+/// Run CPU with timing control
+/// - speed: instructions per second (0 = unlimited)
+/// - time_limit: maximum wall-clock time in seconds
+fn run_with_timing(cpu: &mut Cpu, speed: u64, time_limit: f64) -> u64 {
+    let start = Instant::now();
+    let time_limit_duration = Duration::from_secs_f64(time_limit);
+
+    // Calculate batch size and sleep interval
+    // Execute in batches to reduce overhead
+    let batch_size: u64 = if speed == 0 { 10000 } else { (speed / 100).max(1) };
+    let batch_duration = if speed == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(batch_size as f64 / speed as f64)
+    };
+
+    let mut total_instructions: u64 = 0;
+    let mut batch_start = Instant::now();
+
+    loop {
+        // Check time limit
+        if start.elapsed() >= time_limit_duration {
+            break;
+        }
+
+        // Execute a batch of instructions
+        for _ in 0..batch_size {
+            if !cpu.step() {
+                return total_instructions;
+            }
+            total_instructions += 1;
+        }
+
+        // Pace execution if speed is set
+        if speed > 0 {
+            let elapsed = batch_start.elapsed();
+            if elapsed < batch_duration {
+                thread::sleep(batch_duration - elapsed);
+            }
+            batch_start = Instant::now();
+        }
+    }
+
+    total_instructions
 }
 
 // =============================================================================
@@ -318,7 +389,7 @@ impl Assembler {
         if parts.is_empty() { return 0; }
         match parts[0].to_lowercase().as_str() {
             "la" | "halt" => 4,
-            "push" | "pop" | "mov" | "and" | "ceq" | "clu" | "cls" => 1,
+            "push" | "pop" | "mov" | "and" | "ceq" | "clu" | "cls" | "sub" => 1,
             _ => 2,
         }
     }
@@ -354,12 +425,11 @@ impl Assembler {
             "add" => {
                 let ra = self.reg(&operands[0])?;
                 let op2 = operands[1].trim();
-                // Check if op2 is a register
                 let is_reg = op2.starts_with("r") || op2 == "sp" || op2 == "fp" || op2 == "z" || op2 == "iv" || op2 == "ir";
                 if is_reg && !op2.starts_with("-") && !op2.chars().next().unwrap_or('x').is_ascii_digit() {
                     let rb = self.reg(op2)?;
                     self.output.push(ra * 8 + rb);
-                } else if ra == 4 { // add sp,imm
+                } else if ra == 4 {
                     let imm = self.imm8(op2)?;
                     self.output.push(0x21);
                     self.output.push(imm as u8);
@@ -367,6 +437,20 @@ impl Assembler {
                     let imm = self.imm8(op2)?;
                     self.output.push(0x09 + ra * 8);
                     self.output.push(imm as u8);
+                }
+            }
+            "sub" => {
+                let ra = self.reg(&operands[0])?;
+                let rb = self.reg(&operands[1])?;
+                // sub r0,r1 = 0x0A, sub r0,r2 = 0x0B, sub r2,r0 = 0xA0
+                if ra == 0 && rb == 1 {
+                    self.output.push(0x0A);
+                } else if ra == 0 && rb == 2 {
+                    self.output.push(0x0B);
+                } else if ra == 2 && rb == 0 {
+                    self.output.push(0xA0);
+                } else {
+                    return Err(format!("Unsupported sub encoding: r{},r{}", ra, rb));
                 }
             }
             "mov" => {
@@ -389,35 +473,27 @@ impl Assembler {
                 self.output.push(0x03 + ra * 8 + rb);
             }
             "sb" => {
-                // Store byte: sb ra, imm(rb)
-                // Encoding: 0x80 + ra*8 + rb
                 let ra = self.reg(&operands[0])?;
                 let (imm, rb) = self.mem(&operands[1])?;
                 self.output.push(0x80 + ra * 8 + rb);
                 self.output.push(imm as u8);
             }
             "sw" => {
-                // Store word (3 bytes) to memory
                 let ra = self.reg(&operands[0])?;
                 let (imm, rb) = self.mem(&operands[1])?;
                 if rb == 3 {
-                    // fp-based addressing (common for locals)
                     self.output.push(0x8A + ra);
                 } else {
-                    // general encoding
                     self.output.push(0x8D + ra * 8 + rb);
                 }
                 self.output.push(imm as u8);
             }
             "lw" => {
-                // Load word (3 bytes) from memory
                 let ra = self.reg(&operands[0])?;
                 let (imm, rb) = self.mem(&operands[1])?;
                 if rb == 3 {
-                    // fp-based addressing (common for locals)
                     self.output.push(0x92 + ra);
                 } else {
-                    // general encoding
                     self.output.push(0x95 + ra * 8 + rb);
                 }
                 self.output.push(imm as u8);
@@ -425,7 +501,7 @@ impl Assembler {
             "ceq" => {
                 let ra = self.reg(&operands[0])?;
                 let rb = self.reg(&operands[1])?;
-                if rb == 5 { // ceq ra,z
+                if rb == 5 {
                     self.output.push(0x15 + ra);
                 } else {
                     self.output.push(0x15 + ra + rb);
@@ -453,12 +529,10 @@ impl Assembler {
             }
             "push" => {
                 let ra = self.reg(&operands[0])?;
-                // push encoding: 0x64 + ra*2
                 self.output.push(0x64 + ra * 2);
             }
             "pop" => {
                 let ra = self.reg(&operands[0])?;
-                // pop encoding: 0x70 + ra*2
                 self.output.push(0x70 + ra * 2);
             }
             "halt" => {
@@ -508,8 +582,95 @@ impl Assembler {
 }
 
 // =============================================================================
+// Demo program with spin loop delay
+// =============================================================================
+
+/// LED counter demo with spin loop delay
+/// Counts 0-255 on LEDs with configurable delay between updates
+const DEMO_SOURCE: &str = r#"
+; LED Counter Demo with Spin Loop Delay
+; Counts 0-255 on LEDs, loops forever
+
+        push    fp
+        mov     fp, sp
+        add     sp, -3          ; allocate 1 word for counter
+
+        la      r1, 0xFF0000    ; LED I/O address
+        lc      r0, 0
+        sw      r0, 0(fp)       ; counter = 0
+
+main_loop:
+        ; Write counter to LEDs
+        lw      r0, 0(fp)       ; load counter
+        sb      r0, 0(r1)       ; write to LEDs
+
+        ; Spin loop delay
+        ; ~15000 iterations, 3 instructions each = 45k instructions
+        ; At 100k IPS default speed: ~0.45 seconds per LED change
+        la      r2, 15000
+delay:
+        lc      r0, 1
+        sub     r2, r0
+        brt     delay
+
+        ; Increment counter (wraps at 256)
+        lw      r0, 0(fp)
+        lc      r2, 1
+        add     r0, r2
+        sw      r0, 0(fp)
+
+        bra     main_loop
+"#;
+
+// =============================================================================
 // Main
 // =============================================================================
+
+fn parse_args() -> (String, u64, f64, Option<String>) {
+    let args: Vec<String> = env::args().collect();
+    let mut command = String::new();
+    let mut speed = DEFAULT_SPEED;
+    let mut time_limit = DEFAULT_TIME_LIMIT;
+    let mut file = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--demo" => command = "demo".to_string(),
+            "--run" => {
+                command = "run".to_string();
+                if i + 1 < args.len() {
+                    file = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--assemble" => {
+                command = "assemble".to_string();
+                // Collect remaining args for assemble
+            }
+            "--speed" | "-s" => {
+                if i + 1 < args.len() {
+                    speed = args[i + 1].parse().unwrap_or(DEFAULT_SPEED);
+                    i += 1;
+                }
+            }
+            "--time" | "-t" => {
+                if i + 1 < args.len() {
+                    time_limit = args[i + 1].parse().unwrap_or(DEFAULT_TIME_LIMIT);
+                    i += 1;
+                }
+            }
+            _ => {
+                if command.is_empty() && !args[i].starts_with('-') {
+                    file = Some(args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    (command, speed, time_limit, file)
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -517,58 +678,86 @@ fn main() {
     if args.len() < 2 {
         println!("cor24-run: COR24 assembler and emulator\n");
         println!("Usage:");
-        println!("  cor24-run --demo                  Run built-in LED demo");
-        println!("  cor24-run --run <file.s>          Assemble and run");
+        println!("  cor24-run --demo [options]        Run built-in LED demo");
+        println!("  cor24-run --run <file.s> [opts]   Assemble and run");
         println!("  cor24-run --assemble <in.s> <out.bin> <out.lst>");
-        println!("                                    Assemble to files");
+        println!();
+        println!("Options:");
+        println!("  --speed, -s <ips>    Instructions per second (default: {})", DEFAULT_SPEED);
+        println!("  --time, -t <secs>    Time limit in seconds (default: {})", DEFAULT_TIME_LIMIT);
+        println!();
+        println!("Example:");
+        println!("  cor24-run --demo --speed 100000 --time 10");
         return;
     }
 
-    match args[1].as_str() {
-        "--demo" => {
-            println!("=== COR24 LED Demo ===\n");
-            println!("Program: count 0..15, display on LEDs\n");
-            // Pre-assembled demo
-            let demo: &[u8] = &[
-                0x2A, 0x00, 0x00, 0xFF, // la r1, 0xFF0000
-                0x44, 0x00,             // lc r0, 0
-                0x82, 0x00,             // sb r0, 0(r1)
-                0x09, 0x01,             // add r0, 1
-                0x46, 0x10,             // lc r2, 16
-                0x1F,                   // clu r0, r2
-                0x12, 0xF6,             // brt loop (-10)
-                0xC7, 0x00, 0x00, 0x00, // halt
-            ];
-            let mut cpu = Cpu::new();
-            cpu.load_program(demo);
-            let mut steps = 0;
-            while cpu.step() && steps < 1000 { steps += 1; }
-            println!("\nExecuted {} steps", steps);
-        }
+    let (command, speed, time_limit, file) = parse_args();
 
-        "--run" => {
-            if args.len() < 3 {
-                eprintln!("Usage: cor24-run --run <file.s>");
+    match command.as_str() {
+        "demo" => {
+            println!("=== COR24 LED Demo ===\n");
+            println!("Binary counter 0-255 on LEDs with spin loop delay");
+            println!("Speed: {} instructions/sec, Time limit: {}s\n", speed, time_limit);
+
+            // Assemble the demo source
+            let mut asm = Assembler::new();
+            if let Err(e) = asm.assemble(DEMO_SOURCE) {
+                eprintln!("Assembly error: {}", e);
                 return;
             }
-            let source = fs::read_to_string(&args[2]).expect("Cannot read file");
+
+            println!("Assembled {} bytes\n", asm.output.len());
+
+            // Show listing
+            println!("Program listing:");
+            for line in &asm.listing {
+                if !line.trim().is_empty() {
+                    println!("{}", line);
+                }
+            }
+            println!();
+
+            // Run with timing
+            println!("Running (Ctrl+C to stop)...\n");
+            let mut cpu = Cpu::new();
+            cpu.load_program(&asm.output);
+
+            let instructions = run_with_timing(&mut cpu, speed, time_limit);
+
+            println!("\n\nExecuted {} instructions in {:.1}s", instructions, time_limit);
+            println!("Effective speed: {:.0} IPS", instructions as f64 / time_limit);
+        }
+
+        "run" => {
+            let filename = match file {
+                Some(f) => f,
+                None => {
+                    eprintln!("Usage: cor24-run --run <file.s>");
+                    return;
+                }
+            };
+
+            let source = fs::read_to_string(&filename).expect("Cannot read file");
             let mut asm = Assembler::new();
             if let Err(e) = asm.assemble(&source) {
                 eprintln!("Assembly error: {}", e);
                 return;
             }
+
             println!("Assembled {} bytes\n", asm.output.len());
             println!("Listing:");
             for line in &asm.listing { println!("{}", line); }
-            println!("\nRunning...\n");
+            println!("\nRunning (speed: {} IPS, time limit: {}s)...\n", speed, time_limit);
+
             let mut cpu = Cpu::new();
             cpu.load_program(&asm.output);
-            let mut steps = 0;
-            while cpu.step() && steps < 10000 { steps += 1; }
-            println!("\nExecuted {} steps", steps);
+
+            let instructions = run_with_timing(&mut cpu, speed, time_limit);
+
+            println!("\n\nExecuted {} instructions", instructions);
         }
 
-        "--assemble" => {
+        "assemble" => {
             if args.len() < 5 {
                 eprintln!("Usage: cor24-run --assemble <in.s> <out.bin> <out.lst>");
                 return;
@@ -589,7 +778,7 @@ fn main() {
         }
 
         _ => {
-            eprintln!("Unknown option: {}", args[1]);
+            eprintln!("Unknown command. Use --demo, --run, or --assemble");
         }
     }
 }
