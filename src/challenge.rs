@@ -45,6 +45,26 @@ pub fn get_challenges() -> Vec<Challenge> {
             hint: "Remember LIFO order - last pushed is first popped".to_string(),
             validator: |cpu| cpu.get_reg(0) == 3 && cpu.get_reg(1) == 2 && cpu.get_reg(2) == 1,
         },
+        Challenge {
+            id: 4,
+            name: "Max of Two".to_string(),
+            description: "Set r0 to the maximum of r0=7 and r1=12 (without branching). Use mov ra,c!"
+                .to_string(),
+            initial_code: "; Find max of r0=7 and r1=12, store result in r0\n; Hint: Use COR24's mov ra,c feature\n; Result: r0 = 12\n\n        lc      r0,7\n        lc      r1,12\n\n        ; Your code here\n\n        halt\n"
+                .to_string(),
+            hint: "cls sets C if r0 < r1. If true, you want r1. Use sub/add with C flag.".to_string(),
+            validator: |cpu| cpu.get_reg(0) == 12,
+        },
+        Challenge {
+            id: 5,
+            name: "Byte Sign Extension".to_string(),
+            description: "Load -50 (0xCE) as unsigned into r0, then sign-extend it. Result should be 0xFFFFCE."
+                .to_string(),
+            initial_code: "; Load 0xCE unsigned, then sign extend\n; Result: r0 = 0xFFFFCE (-50)\n\n"
+                .to_string(),
+            hint: "Use lcu to load unsigned, then sxt to sign extend".to_string(),
+            validator: |cpu| cpu.get_reg(0) == 0xFFFFCE,
+        },
     ]
 }
 
@@ -139,7 +159,7 @@ loop:   add     r0,1        ; counter++
 ; Store values to memory and read them back
 
         lc      r0,100      ; Value to store
-        lc      r1,0x1000   ; Memory address (high byte)
+        la      r1,0x1000   ; Load 24-bit address (la, not lc!)
 
         ; Store byte
         sb      r0,0(r1)    ; mem[0x1000] = 100
@@ -148,6 +168,75 @@ loop:   add     r0,1        ; counter++
         lb      r2,0(r1)    ; r2 = mem[0x1000]
 
         ; r2 should be 100
+        halt
+"#
+            .to_string(),
+        ),
+        (
+            "Condition Flag".to_string(),
+            "COR24's unique mov ra,c to capture comparison result.".to_string(),
+            r#"; Example 6: Condition Flag
+; COR24 can move the C flag directly to a register
+; This is useful for branchless comparisons
+
+        lc      r0,5        ; r0 = 5
+        lc      r1,10       ; r1 = 10
+
+        cls     r0,r1       ; C = (5 < 10) = 1
+        mov     r2,c        ; r2 = C = 1 (no branch needed!)
+
+        lc      r0,20       ; r0 = 20
+        cls     r0,r1       ; C = (20 < 10) = 0
+        mov     r0,c        ; r0 = C = 0
+
+        halt
+"#
+            .to_string(),
+        ),
+        (
+            "Sign Extension".to_string(),
+            "Demonstrate sxt/zxt for byte-to-word conversion.".to_string(),
+            r#"; Example 7: Sign Extension
+; COR24 is 24-bit but loads 8-bit values
+; sxt/zxt extend bytes to full 24-bit words
+
+        lc      r0,127      ; r0 = 0x00007F (positive)
+        lc      r1,-1       ; r1 = 0xFFFFFF (sign extended)
+
+        lcu     r2,255      ; r2 = 0x0000FF (unsigned)
+
+        ; Store byte and reload with different extension
+        la      r0,0x100
+        lc      r1,0x80     ; -128 signed, 128 unsigned
+        sb      r1,0(r0)    ; Store byte
+
+        lb      r1,0(r0)    ; r1 = 0xFFFF80 (sign extended)
+        lbu     r2,0(r0)    ; r2 = 0x000080 (zero extended)
+
+        halt
+"#
+            .to_string(),
+        ),
+        (
+            "24-bit Arithmetic".to_string(),
+            "Working with COR24's 24-bit word size.".to_string(),
+            r#"; Example 8: 24-bit Arithmetic
+; COR24 uses 24-bit (3-byte) words
+; Max unsigned: 0xFFFFFF = 16,777,215
+; Max signed: 0x7FFFFF = 8,388,607
+
+        la      r0,0x7FFFFF ; Max positive signed
+        lc      r1,1
+        add     r0,r1       ; Overflow to 0x800000 (negative)
+
+        la      r0,0xFFFFFF ; Max unsigned
+        add     r0,r1       ; Wraps to 0x000000
+
+        ; 24-bit multiplication
+        la      r0,0x100    ; 256
+        lc      r1,16
+        mul     r0,r1       ; r0 = 4096 (0x1000)
+
         halt
 "#
             .to_string(),
