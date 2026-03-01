@@ -7,7 +7,7 @@
 main:
         push    fp
         mov     fp, sp
-        add     sp, -6
+        add     sp, -3
         lc      r0, 0
         sw      r0, 0(fp)
 .L0:
@@ -17,19 +17,10 @@ main:
         add     r0, r2
         sb      r1, 0(r0)
         lw      r0, 0(fp)
-        la      r1, 0x0000FF
-        and     r0, r1
-        sw      r0, 3(fp)
-        lw      r0, 0(fp)
         lc      r1, 1
         add     r0, r1
         sw      r0, 0(fp)
-        lw      r0, 3(fp)
-        lc      r1, 15
-        clu     r0, r1
-        mov     r0, c
-        ceq     r0, z
-        brf     .L0
+        bra     .L0
 .L1:
         mov     sp, fp
         pop     fp

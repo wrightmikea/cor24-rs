@@ -22,6 +22,8 @@ struct Cpu {
     halted: bool,
     leds: u8,
     prev_leds: u8,
+    led_changes: u32,
+    max_led_changes: u32,
 }
 
 impl Cpu {
@@ -34,6 +36,8 @@ impl Cpu {
             halted: false,
             leds: 0,
             prev_leds: 0xFF,
+            led_changes: 0,
+            max_led_changes: 16, // Stop after 16 LED changes by default
         };
         // Initialize stack pointer to top of RAM
         cpu.regs[4] = 0xFE00; // sp = 0xFE00 (below I/O region)
@@ -54,13 +58,15 @@ impl Cpu {
 
     fn write_byte(&mut self, addr: u32, val: u8) {
         let addr = addr & 0xFFFFFF;
-        // Debug: show writes to high memory
-        // if addr >= 0xFE0000 { eprintln!("  WRITE 0x{:06X} = 0x{:02X}", addr, val); }
         if addr == IO_LEDSWDAT {
             self.leds = val;
             if self.leds != self.prev_leds {
                 print_leds(self.leds);
                 self.prev_leds = self.leds;
+                self.led_changes += 1;
+                if self.led_changes >= self.max_led_changes {
+                    self.halted = true;
+                }
             }
         } else if (addr & 0xFF0000) != 0xFF0000 {
             let len = self.mem.len();

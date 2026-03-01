@@ -16,8 +16,9 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 /// Main entry point - exported for WASM
+/// Runs forever (typical embedded blink pattern)
 #[no_mangle]
-pub extern "C" fn main() {
+pub extern "C" fn main() -> ! {
     let mut counter: u8 = 0;
 
     loop {
@@ -28,11 +29,6 @@ pub extern "C" fn main() {
 
         // Increment (wraps at 256)
         counter = counter.wrapping_add(1);
-
-        // Stop after 16 iterations for demo
-        if counter >= 16 {
-            break;
-        }
     }
 }
 
