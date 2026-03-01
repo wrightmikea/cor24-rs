@@ -12,18 +12,35 @@ pub struct RustExample {
     pub rust_source: String,
     pub wasm_hex: String,
     pub wasm_size: usize,
+    pub wasm_disassembly: String,
     pub cor24_assembly: String,
     pub machine_code_hex: String,
     pub machine_code_size: usize,
     pub listing: String,
 }
 
+/// CPU state for display in the Rust pipeline execution panel
+#[derive(Clone, PartialEq, Default)]
+pub struct RustCpuState {
+    pub registers: [u32; 8],
+    pub pc: u32,
+    pub condition_flag: bool,
+    pub is_halted: bool,
+    pub led_value: u8,
+    pub cycle_count: u32,
+    pub memory_snapshot: Vec<u8>,
+    pub current_instruction: String,
+}
+
 #[derive(Properties, PartialEq)]
 pub struct RustPipelineProps {
     pub examples: Vec<RustExample>,
-    pub on_run: Callback<RustExample>,
-    pub led_value: u8,
-    pub cycle_count: u32,
+    pub on_load: Callback<RustExample>,
+    pub on_step: Callback<()>,
+    pub on_run: Callback<()>,
+    pub on_reset: Callback<()>,
+    pub cpu_state: RustCpuState,
+    pub is_loaded: bool,
     pub is_running: bool,
 }
 
@@ -47,30 +64,47 @@ pub fn rust_pipeline(props: &RustPipelineProps) -> Html {
         })
     };
 
-    let on_run_click = {
-        let on_run = props.on_run.clone();
+    let on_load_click = {
+        let on_load = props.on_load.clone();
         let selected = selected_example.clone();
         Callback::from(move |_| {
             if let Some(example) = &*selected {
-                on_run.emit(example.clone());
+                on_load.emit(example.clone());
             }
         })
     };
+
+    let on_step_click = {
+        let on_step = props.on_step.clone();
+        Callback::from(move |_| on_step.emit(()))
+    };
+
+    let on_run_click = {
+        let on_run = props.on_run.clone();
+        Callback::from(move |_| on_run.emit(()))
+    };
+
+    let on_reset_click = {
+        let on_reset = props.on_reset.clone();
+        Callback::from(move |_| on_reset.emit(()))
+    };
+
+    let state = &props.cpu_state;
 
     html! {
         <div class="rust-pipeline">
             // Example selector
             <div class="pipeline-header">
                 <label>{"Example: "}</label>
-                <select onchange={on_example_select}>
+                <select onchange={on_example_select} disabled={props.is_running}>
                     {for props.examples.iter().map(|ex| {
                         html! {
                             <option value={ex.name.clone()}>{&ex.name}{" - "}{&ex.description}</option>
                         }
                     })}
                 </select>
-                <button class="run-pipeline-btn" onclick={on_run_click} disabled={props.is_running}>
-                    {if props.is_running { "Running..." } else { "▶ Run Pipeline" }}
+                <button class="load-btn" onclick={on_load_click} disabled={props.is_running}>
+                    {"Load"}
                 </button>
             </div>
 
@@ -86,6 +120,11 @@ pub fn rust_pipeline(props: &RustPipelineProps) -> Html {
                     <pre class="code-block hex-dump">{&example.wasm_hex}</pre>
                 </Collapsible>
 
+                // WASM Disassembly (collapsible)
+                <Collapsible title="2b. WASM Disassembly">
+                    <pre class="code-block wasm-disasm">{&example.wasm_disassembly}</pre>
+                </Collapsible>
+
                 // COR24 Assembly (collapsible, initially open)
                 <Collapsible title="3. COR24 Assembly" initially_open={true}>
                     <pre class="code-block asm-code">{&example.cor24_assembly}</pre>
@@ -98,27 +137,114 @@ pub fn rust_pipeline(props: &RustPipelineProps) -> Html {
                     <pre class="code-block listing">{&example.listing}</pre>
                 </Collapsible>
 
-                // Execution panel
+                // Execution panel with controls and state
                 <div class="pipeline-stage execution-panel">
                     <h3>{"5. Execution"}</h3>
-                    <div class="execution-status">
-                        <div class="led-display">
-                            <span class="led-label">{"LEDs: "}</span>
-                            <div class="led-row">
-                                {for (0..8).rev().map(|i| {
-                                    let led_on = (props.led_value >> i) & 1 == 1;
-                                    let class = if led_on { "led led-on" } else { "led led-off" };
+
+                    // Control buttons
+                    <div class="execution-controls">
+                        <button class="step-btn" onclick={on_step_click}
+                            disabled={!props.is_loaded || state.is_halted || props.is_running}>
+                            {"Step"}
+                        </button>
+                        <button class="run-btn" onclick={on_run_click}
+                            disabled={!props.is_loaded || state.is_halted || props.is_running}>
+                            {if props.is_running { "Running..." } else { "Run" }}
+                        </button>
+                        <button class="reset-btn" onclick={on_reset_click}
+                            disabled={!props.is_loaded || props.is_running}>
+                            {"Reset"}
+                        </button>
+                        if state.is_halted {
+                            <span class="status-halted">{"HALTED"}</span>
+                        }
+                    </div>
+
+                    // Current instruction
+                    if props.is_loaded && !state.current_instruction.is_empty() {
+                        <div class="current-instruction">
+                            <span class="label">{"Next: "}</span>
+                            <code>{&state.current_instruction}</code>
+                        </div>
+                    }
+
+                    // Two-column layout for registers and I/O
+                    <div class="execution-state">
+                        // Left column: Registers
+                        <div class="registers-panel">
+                            <h4>{"Registers"}</h4>
+                            <div class="register-grid">
+                                {for (0..8).map(|i| {
+                                    let name = match i {
+                                        0 => "r0",
+                                        1 => "r1",
+                                        2 => "r2",
+                                        3 => "fp",
+                                        4 => "sp",
+                                        5 => "z",
+                                        6 => "iv",
+                                        7 => "ir",
+                                        _ => "??",
+                                    };
+                                    let val = state.registers[i];
                                     html! {
-                                        <div class={class}>{i}</div>
+                                        <div class="register-row">
+                                            <span class="reg-name">{name}</span>
+                                            <span class="reg-value">{format!("0x{:06X}", val)}</span>
+                                        </div>
                                     }
                                 })}
+                                <div class="register-row">
+                                    <span class="reg-name">{"PC"}</span>
+                                    <span class="reg-value">{format!("0x{:06X}", state.pc)}</span>
+                                </div>
+                                <div class="register-row">
+                                    <span class="reg-name">{"C"}</span>
+                                    <span class="reg-value">{if state.condition_flag { "1" } else { "0" }}</span>
+                                </div>
                             </div>
-                            <span class="led-value">{format!("0x{:02X}", props.led_value)}</span>
                         </div>
-                        <div class="cycle-count">
-                            <span>{"Cycles: "}{props.cycle_count}</span>
+
+                        // Right column: I/O
+                        <div class="io-panel">
+                            <h4>{"I/O Peripherals"}</h4>
+
+                            // LEDs
+                            <div class="led-display">
+                                <span class="led-label">{"LEDs: "}</span>
+                                <div class="led-row">
+                                    {for (0..8).rev().map(|i| {
+                                        let led_on = (state.led_value >> i) & 1 == 1;
+                                        let class = if led_on { "led led-on" } else { "led led-off" };
+                                        html! {
+                                            <div class={class}>{i}</div>
+                                        }
+                                    })}
+                                </div>
+                                <span class="led-value">{format!("0x{:02X}", state.led_value)}</span>
+                            </div>
+
+                            // Cycle count
+                            <div class="cycle-count">
+                                <span>{"Cycles: "}{state.cycle_count}</span>
+                            </div>
+
+                            // I2C placeholder
+                            <div class="i2c-panel">
+                                <span class="i2c-label">{"I2C Bus: "}</span>
+                                <span class="i2c-status">{"(not connected)"}</span>
+                            </div>
                         </div>
                     </div>
+
+                    // Memory viewer (first 64 bytes of stack area)
+                    if props.is_loaded && !state.memory_snapshot.is_empty() {
+                        <Collapsible title="Memory (Stack)" badge={Some(format!("{} bytes", state.memory_snapshot.len()))}>
+                            <pre class="code-block memory-dump">{
+                                format_memory_dump(&state.memory_snapshot, 0xFFFFC0)
+                            }</pre>
+                        </Collapsible>
+                    }
                 </div>
             }
 
@@ -128,4 +254,21 @@ pub fn rust_pipeline(props: &RustPipelineProps) -> Html {
             </div>
         </div>
     }
+}
+
+/// Format memory as hex dump with addresses
+fn format_memory_dump(data: &[u8], base_addr: u32) -> String {
+    let mut output = String::new();
+    for (i, chunk) in data.chunks(16).enumerate() {
+        let addr = base_addr + (i * 16) as u32;
+        output.push_str(&format!("{:06X}: ", addr));
+        for (j, byte) in chunk.iter().enumerate() {
+            output.push_str(&format!("{:02X} ", byte));
+            if j == 7 {
+                output.push(' ');
+            }
+        }
+        output.push('\n');
+    }
+    output
 }

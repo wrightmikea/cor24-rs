@@ -992,6 +992,192 @@ header h1 {
     padding: 10px;
 }
 
+/* Execution controls */
+.execution-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #0f3460;
+}
+
+.load-btn, .step-btn, .run-btn, .reset-btn {
+    padding: 6px 16px;
+    font-size: 0.8em;
+    font-weight: bold;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.load-btn {
+    background: #0f3460;
+    color: #00d9ff;
+    border: 1px solid #00d9ff;
+}
+
+.load-btn:hover:not(:disabled) {
+    background: #00d9ff;
+    color: #1a1a2e;
+}
+
+.step-btn {
+    background: #2196f3;
+    color: white;
+}
+
+.step-btn:hover:not(:disabled) {
+    background: #1976d2;
+}
+
+.run-btn {
+    background: #4caf50;
+    color: white;
+}
+
+.run-btn:hover:not(:disabled) {
+    background: #45a049;
+}
+
+.reset-btn {
+    background: #ff5722;
+    color: white;
+}
+
+.reset-btn:hover:not(:disabled) {
+    background: #e64a19;
+}
+
+.load-btn:disabled, .step-btn:disabled, .run-btn:disabled, .reset-btn:disabled {
+    background: #555;
+    color: #888;
+    cursor: not-allowed;
+    border-color: #555;
+}
+
+.status-halted {
+    color: #ff5722;
+    font-weight: bold;
+    font-size: 0.85em;
+    margin-left: auto;
+}
+
+/* Current instruction display */
+.current-instruction {
+    background: #0f3460;
+    padding: 8px 12px;
+    border-radius: 3px;
+    margin-bottom: 12px;
+    font-family: 'Monaco', monospace;
+    font-size: 0.8em;
+}
+
+.current-instruction .label {
+    color: #888;
+}
+
+.current-instruction code {
+    color: #0f0;
+}
+
+/* Two-column execution state */
+.execution-state {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+/* Registers panel */
+.registers-panel {
+    background: #0f3460;
+    padding: 12px;
+    border-radius: 5px;
+}
+
+.registers-panel h4 {
+    color: #00d9ff;
+    font-size: 0.8em;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #16213e;
+}
+
+.register-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+}
+
+.register-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 8px;
+    background: #16213e;
+    border-radius: 2px;
+}
+
+.reg-name {
+    color: #00d9ff;
+    font-weight: bold;
+    font-size: 0.75em;
+}
+
+.reg-value {
+    color: #0f0;
+    font-family: 'Monaco', monospace;
+    font-size: 0.75em;
+}
+
+/* I/O panel */
+.io-panel {
+    background: #0f3460;
+    padding: 12px;
+    border-radius: 5px;
+}
+
+.io-panel h4 {
+    color: #00d9ff;
+    font-size: 0.8em;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #16213e;
+}
+
+/* I2C panel placeholder */
+.i2c-panel {
+    margin-top: 12px;
+    padding: 8px;
+    background: #16213e;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.i2c-label {
+    color: #888;
+    font-size: 0.8em;
+}
+
+.i2c-status {
+    color: #666;
+    font-size: 0.75em;
+    font-style: italic;
+}
+
+/* Memory dump */
+.memory-dump {
+    color: #888;
+    font-size: 0.7em;
+}
+
+/* WASM disassembly */
+.wasm-disasm {
+    color: #f39c12;
+}
+
 /* =============================================================================
    Tab Content Areas
    ============================================================================= */

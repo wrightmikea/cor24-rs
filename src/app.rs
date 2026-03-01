@@ -2,7 +2,7 @@
 
 use components::{
     Collapsible, Header, LegendItem, MemoryViewer, Modal, ProgramArea, Register, RegisterPanel,
-    RustExample, RustPipeline, Sidebar, SidebarButton, Tab, TabBar,
+    RustCpuState, RustExample, RustPipeline, Sidebar, SidebarButton, Tab, TabBar,
 };
 use yew::prelude::*;
 
@@ -14,10 +14,12 @@ pub fn app() -> Html {
     // Tab state
     let active_tab = use_state(|| "assembler".to_string());
 
-    // Rust pipeline state
-    let rust_led_value = use_state(|| 0u8);
-    let rust_cycle_count = use_state(|| 0u32);
+    // Rust pipeline state - separate CPU for Rust tab execution
+    let rust_cpu = use_state(WasmCpu::new);
+    let rust_cpu_state = use_state(RustCpuState::default);
+    let rust_is_loaded = use_state(|| false);
     let rust_is_running = use_state(|| false);
+    let rust_loaded_example = use_state(|| None::<RustExample>);
 
     // State management
     let cpu = use_state(WasmCpu::new);
@@ -217,44 +219,158 @@ pub fn app() -> Html {
         })
     };
 
-    // Rust pipeline run callback
+    // Helper to update rust_cpu_state from rust_cpu
+    let update_rust_cpu_state = {
+        let rust_cpu = rust_cpu.clone();
+        let rust_cpu_state = rust_cpu_state.clone();
+        move || {
+            let cpu = &*rust_cpu;
+            let regs = cpu.get_registers();
+            let mut registers = [0u32; 8];
+            for (i, &val) in regs.iter().enumerate().take(8) {
+                registers[i] = val;
+            }
+
+            // Get memory snapshot (stack area: last 64 bytes)
+            let mut memory_snapshot = Vec::new();
+            for addr in (0xFFFFC0..=0xFFFFFF).step_by(1) {
+                memory_snapshot.push(cpu.read_byte(addr as u32));
+            }
+
+            rust_cpu_state.set(RustCpuState {
+                registers,
+                pc: cpu.get_pc(),
+                condition_flag: cpu.get_condition_flag(),
+                is_halted: cpu.is_halted(),
+                led_value: cpu.get_led_value(),
+                cycle_count: cpu.get_cycle_count(),
+                memory_snapshot,
+                current_instruction: cpu.get_current_instruction(),
+            });
+        }
+    };
+
+    // Rust pipeline: Load example
+    let on_rust_load = {
+        let rust_cpu = rust_cpu.clone();
+        let rust_is_loaded = rust_is_loaded.clone();
+        let rust_loaded_example = rust_loaded_example.clone();
+        let update_state = update_rust_cpu_state.clone();
+
+        Callback::from(move |example: RustExample| {
+            let mut new_cpu = WasmCpu::new();
+            // Assemble the COR24 assembly from the example
+            if new_cpu.assemble(&example.cor24_assembly).is_ok() {
+                rust_cpu.set(new_cpu);
+                rust_is_loaded.set(true);
+                rust_loaded_example.set(Some(example));
+                update_state();
+            }
+        })
+    };
+
+    // Rust pipeline: Step one instruction
+    let on_rust_step = {
+        let rust_cpu = rust_cpu.clone();
+        let update_state = update_rust_cpu_state.clone();
+
+        Callback::from(move |()| {
+            let mut new_cpu = (*rust_cpu).clone();
+            if new_cpu.step().is_ok() {
+                rust_cpu.set(new_cpu);
+                update_state();
+            }
+        })
+    };
+
+    // Rust pipeline: Run to completion (or max cycles)
     let on_rust_run = {
-        let rust_led_value = rust_led_value.clone();
-        let rust_cycle_count = rust_cycle_count.clone();
+        let rust_cpu = rust_cpu.clone();
         let rust_is_running = rust_is_running.clone();
+        let rust_cpu_state = rust_cpu_state.clone();
 
-        Callback::from(move |_example: RustExample| {
+        Callback::from(move |()| {
             rust_is_running.set(true);
-            // Simulate running the pipeline - animate LED values
-            let led = rust_led_value.clone();
-            let cycles = rust_cycle_count.clone();
+            let cpu = rust_cpu.clone();
             let running = rust_is_running.clone();
+            let state = rust_cpu_state.clone();
 
-            // Use gloo timer to animate
-            gloo::timers::callback::Timeout::new(100, move || {
-                let val = 0u8;
-                let led = led.clone();
-                let cycles = cycles.clone();
-                let running = running.clone();
+            // Run with animation using timer
+            gloo::timers::callback::Timeout::new(50, move || {
+                fn run_step(
+                    cpu: yew::UseStateHandle<WasmCpu>,
+                    running: yew::UseStateHandle<bool>,
+                    state: yew::UseStateHandle<RustCpuState>,
+                    steps: u32,
+                ) {
+                    let mut new_cpu = (*cpu).clone();
 
-                // Animate through LED values
-                fn animate_step(val: u8, led: yew::UseStateHandle<u8>, cycles: yew::UseStateHandle<u32>, running: yew::UseStateHandle<bool>) {
-                    if val < 16 {
-                        led.set(val);
-                        cycles.set((val as u32 + 1) * 10);
-                        let led = led.clone();
-                        let cycles = cycles.clone();
-                        let running = running.clone();
-                        gloo::timers::callback::Timeout::new(150, move || {
-                            animate_step(val + 1, led, cycles, running);
-                        }).forget();
-                    } else {
+                    // Execute a batch of instructions
+                    let mut halted = false;
+                    for _ in 0..10 {
+                        if new_cpu.is_halted() || new_cpu.should_stop_for_led() {
+                            halted = true;
+                            break;
+                        }
+                        if new_cpu.step().is_err() {
+                            halted = true;
+                            break;
+                        }
+                    }
+
+                    // Update state
+                    let regs = new_cpu.get_registers();
+                    let mut registers = [0u32; 8];
+                    for (i, &val) in regs.iter().enumerate().take(8) {
+                        registers[i] = val;
+                    }
+                    let mut memory_snapshot = Vec::new();
+                    for addr in (0xFFFFC0..=0xFFFFFF).step_by(1) {
+                        memory_snapshot.push(new_cpu.read_byte(addr as u32));
+                    }
+                    state.set(RustCpuState {
+                        registers,
+                        pc: new_cpu.get_pc(),
+                        condition_flag: new_cpu.get_condition_flag(),
+                        is_halted: new_cpu.is_halted(),
+                        led_value: new_cpu.get_led_value(),
+                        cycle_count: new_cpu.get_cycle_count(),
+                        memory_snapshot,
+                        current_instruction: new_cpu.get_current_instruction(),
+                    });
+                    cpu.set(new_cpu.clone());
+
+                    if halted || steps > 1000 {
                         running.set(false);
+                    } else {
+                        let cpu = cpu.clone();
+                        let running = running.clone();
+                        let state = state.clone();
+                        gloo::timers::callback::Timeout::new(30, move || {
+                            run_step(cpu, running, state, steps + 10);
+                        }).forget();
                     }
                 }
 
-                animate_step(val, led, cycles, running);
+                run_step(cpu, running, state, 0);
             }).forget();
+        })
+    };
+
+    // Rust pipeline: Reset
+    let on_rust_reset = {
+        let rust_cpu = rust_cpu.clone();
+        let rust_loaded_example = rust_loaded_example.clone();
+        let update_state = update_rust_cpu_state.clone();
+
+        Callback::from(move |()| {
+            if let Some(example) = &*rust_loaded_example {
+                let mut new_cpu = WasmCpu::new();
+                if new_cpu.assemble(&example.cor24_assembly).is_ok() {
+                    rust_cpu.set(new_cpu);
+                    update_state();
+                }
+            }
         })
     };
 
@@ -465,9 +581,12 @@ pub fn app() -> Html {
             <div class={if *active_tab == "rust" { "rust-tab-content" } else { "rust-tab-content hidden" }}>
                 <RustPipeline
                     examples={rust_examples}
+                    on_load={on_rust_load}
+                    on_step={on_rust_step}
                     on_run={on_rust_run}
-                    led_value={*rust_led_value}
-                    cycle_count={*rust_cycle_count}
+                    on_reset={on_rust_reset}
+                    cpu_state={(*rust_cpu_state).clone()}
+                    is_loaded={*rust_is_loaded}
                     is_running={*rust_is_running}
                 />
             </div>
@@ -866,6 +985,26 @@ pub extern "C" fn main() -> ! {
                        037f 0141 8080 c000 0b7f 0041 8080 c000\n\
                        0b7f 0041 8080 c000 0b07 3205 066d 656d".to_string(),
             wasm_size: 448,
+            wasm_disassembly: r#"(module
+  (type (;0;) (func))
+  (type (;1;) (func (param i32 i32) (result i32)))
+  (func (;0;) (type 0)
+    (local i32)
+    i32.const 0
+    local.set 0
+    loop  ;; label = @1
+      i32.const 0xFF0000
+      local.get 0
+      i32.store8
+      local.get 0
+      i32.const 1
+      i32.add
+      local.set 0
+      br 0 (;@1;)
+    end)
+  (memory (;0;) 16)
+  (export "memory" (memory 0))
+  (export "main" (func 0)))"#.to_string(),
             cor24_assembly: r#"; Function: main
 main:
         push    fp
@@ -920,6 +1059,13 @@ pub extern "C" fn add(a: i32, b: i32) -> i32 {
                        7f03 0201 0007 0701 0361 6464 0000 0a09\n\
                        0107 0020 0020 016a 0b".to_string(),
             wasm_size: 42,
+            wasm_disassembly: r#"(module
+  (type (;0;) (func (param i32 i32) (result i32)))
+  (func (;0;) (type 0) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (export "add" (func 0)))"#.to_string(),
             cor24_assembly: r#"; Function: add
 ; Signature: (I32, I32) -> I32
 add:

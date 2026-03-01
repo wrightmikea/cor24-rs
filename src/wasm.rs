@@ -214,6 +214,71 @@ impl WasmCpu {
         self.cpu.io.uart_rx = c as u8;
         self.cpu.io.uart_rx_ready = true;
     }
+
+    // ===== Additional accessors for Rust pipeline =====
+
+    /// Get program counter (alias for pc())
+    pub fn get_pc(&self) -> u32 {
+        self.cpu.pc
+    }
+
+    /// Get condition flag (alias for get_c_flag())
+    pub fn get_condition_flag(&self) -> bool {
+        self.cpu.c
+    }
+
+    /// Get LED value (alias for get_leds())
+    pub fn get_led_value(&self) -> u8 {
+        self.cpu.io.leds
+    }
+
+    /// Get cycle count as u32 (truncated from u64)
+    pub fn get_cycle_count(&self) -> u32 {
+        self.cpu.cycles as u32
+    }
+
+    /// Read a byte from memory (alias for read_memory())
+    pub fn read_byte(&self, addr: u32) -> u8 {
+        self.cpu.read_byte(addr)
+    }
+
+    /// Get the current instruction disassembly
+    pub fn get_current_instruction(&self) -> String {
+        if self.cpu.halted {
+            return "HALTED".to_string();
+        }
+        // Read opcode at PC
+        let pc = self.cpu.pc;
+        let opcode = self.cpu.read_byte(pc);
+
+        // Get basic instruction name from opcode
+        let name = match opcode {
+            0x00..=0x02 => "add",
+            0x03..=0x0B => "add/sub/mul",
+            0x0C..=0x12 => "logic",
+            0x13 => "bra",
+            0x14 => "brf",
+            0x15 => "brt",
+            0x16..=0x43 => "mov/cmp",
+            0x44..=0x4F => "lc",
+            0x50..=0x5F => "mov",
+            0x60..=0x6F => "jmp/jal",
+            0x70..=0x7F => "push/pop",
+            0x80..=0x9F => "sw/lw",
+            0xA0..=0xBF => "sb/lb",
+            0xC0..=0xCF => "la",
+            0xD0..=0xD2 => "li",
+            _ => "???",
+        };
+        format!("{:04X}: {:02X}  {}", pc, opcode, name)
+    }
+
+    /// Check if should stop for LED output (for animation purposes)
+    /// Returns true after a reasonable number of cycles to prevent infinite loops
+    pub fn should_stop_for_led(&self) -> bool {
+        // Stop after 10000 cycles to prevent infinite loops in animation
+        self.cpu.cycles >= 10000
+    }
 }
 
 // ===== Challenge System =====
