@@ -215,6 +215,15 @@ impl Assembler {
     }
 
     fn parse_instruction(&mut self, inst: &str, line_num: usize) -> Vec<u8> {
+        // Strip trailing comments
+        let inst = if let Some(pos) = inst.find(';') {
+            &inst[..pos]
+        } else if let Some(pos) = inst.find('#') {
+            &inst[..pos]
+        } else {
+            inst
+        };
+
         let parts: Vec<&str> = inst.split_whitespace().collect();
         if parts.is_empty() {
             return vec![];
@@ -1016,5 +1025,13 @@ mod tests {
         let result = asm.assemble("sxt r0,r1\nzxt r1,r2");
         assert!(result.errors.is_empty(), "Errors: {:?}", result.errors);
         assert_eq!(result.bytes, vec![0xB0, 0xC3]);
+    }
+
+    #[test]
+    fn test_trailing_comments() {
+        let mut asm = Assembler::new();
+        let result = asm.assemble("lc r0,10       ; load constant\nadd r0,r1  # add");
+        assert!(result.errors.is_empty(), "Errors: {:?}", result.errors);
+        assert_eq!(result.bytes, vec![0x44, 10, 0x01]);
     }
 }
