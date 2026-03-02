@@ -1,6 +1,6 @@
-# COR24 Assembly Emulator
+# COR24 C-Oriented RISC, 24-bit - Assembly Emulator
 
-A browser-based educational emulator for the COR24 (C-Oriented RISC 24-bit) assembly architecture. Written in Rust and compiled to WebAssembly.
+A browser-based educational emulator for the COR24 assembly architecture. Written in Rust and compiled to WebAssembly.
 
 **[Live Demo](https://sw-embed.github.io/cor24-rs/)**
 
